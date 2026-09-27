@@ -1,0 +1,29 @@
+# Build
+build/
+out/
+*.class
+
+# Gradle
+.gradle/
+gradle.properties.local
+
+# Machine-specific / secrets (never commit)
+env.ps1
+*.key
+secrets.*
+*.jks
+*.keystore
+keystore.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+bin/
+
+# OS
+.DS_Store
+Thumbs.db
