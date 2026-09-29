@@ -4,7 +4,7 @@
 
 **挂在聊天窗口旁的「对话副驾」：看屏读取正在聊的对话，判断对方意图与风险，起草 3 条候选回复，一键填进输入框——发不发，永远由你。**
 
-[![Version](https://img.shields.io/badge/%E7%89%88%E6%9C%AC-v0.1.0-1f6feb?style=flat-square)](#构建与运行)
+[![Version](https://img.shields.io/badge/%E7%89%88%E6%9C%AC-v0.2.1-1f6feb?style=flat-square)](#下载)
 [![Windows](https://img.shields.io/badge/Windows-10%2B-0078D4?style=flat-square&logo=windows&logoColor=white)](#构建与运行)
 [![Java](https://img.shields.io/badge/Java-17-f89820?style=flat-square&logo=openjdk&logoColor=white)](#构建与运行)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
@@ -31,6 +31,11 @@
 
 <img src="docs/img/pipeline.svg" width="820" />
 
+## 下载
+
+- [Releases](https://github.com/ChencLi819/aichat-windows/releases)：便携版 zip，解压后运行文件夹里的 `AIChatAssistant.exe`。自带 JRE，**无需安装 Java**，也不需要安装过程。
+- 需要 Windows 10 及以上，以及一把你自己申请的模型接口密钥（OpenAI 兼容，判断 / 生成 / 视觉三路可分别配置）。
+
 ## 它做什么
 
 - **看屏，不侵入。** 聊天软件对 UI Automation 不暴露控件树（`tools/uia-probe.ps1` 是当时的实测脚本），所以采集走「框选区域 → 定时截屏 → 视觉模型读取」，不 hook、不注入、不读写聊天软件的任何文件与进程内存。
@@ -49,7 +54,7 @@
 
 ```bash
 ./gradlew run          # 开发运行
-./gradlew fatJar       # 单个可执行 fat jar（build/libs/aichat-desktop-0.1.0-all.jar）
+./gradlew fatJar       # 单个可执行 fat jar（build/libs/aichat-desktop-0.2.1-all.jar）
 ./gradlew genIcon      # 重新生成 assets/ 下的应用图标（Java2D 绘制，无需图像工具链）
 ./gradlew packageExe   # jpackage 打包：AIChatAssistant.exe + 自带 JRE 的绿色目录（build/jpackage/）
 ```

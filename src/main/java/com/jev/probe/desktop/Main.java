@@ -8,6 +8,7 @@ import com.jev.probe.desktop.ui.Icons;
 import com.jev.probe.desktop.ui.KnowledgeDialog;
 import com.jev.probe.desktop.ui.OnboardingDialog;
 import com.jev.probe.desktop.ui.RegionSelector;
+import com.jev.probe.desktop.ui.Screens;
 import com.jev.probe.desktop.ui.SettingsDialog;
 import com.jev.probe.desktop.ui.ThemeManager;
 import com.jev.probe.desktop.ui.UiTrace;
@@ -186,6 +187,9 @@ public final class Main {
 
         panel.setVisible(true);
         pipeline.start();
+        // 后台预热多屏拓扑：跨屏拖拽要用 Win32 的物理矩形，第一次访问要几百
+        // 毫秒（JNA 初始化），放在这里就不会变成用户第一次拖窗口时的卡顿。
+        Screens.warmUp();
     }
 
     /**

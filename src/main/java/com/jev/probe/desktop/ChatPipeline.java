@@ -426,6 +426,9 @@ public final class ChatPipeline implements AutoCloseable {
                 ChatAiClient.AskResult res = ai.ask(question, snap, relation.value(), ctx,
                     (kind, chunk) -> {
                         if ("reasoning".equals(kind)) post(() -> panel.onThinkingDelta(chunk));
+                        // 上游重试（思考吃满上限后关掉思考再问）时把上一轮的现场清掉，
+                        // 否则界面上会把两次思考拼在一起。
+                        if ("reset".equals(kind)) post(panel::onThinkingReset);
                     });
                 post(() -> panel.showAnswer(question, res.answer(), res.reasoning()));
             } catch (Exception e) {
@@ -545,6 +548,9 @@ public final class ChatPipeline implements AutoCloseable {
                 try {
                     Analysis a = ai.judge(snapshot, relation.value(), ctx, (kind, chunk) -> {
                         if ("reasoning".equals(kind)) post(() -> panel.onThinkingDelta(chunk));
+                        // 判断路由也会在“空响应”时关掉思考重试一次（见 LlmJudgeClient），
+                        // 重试前把上一轮的思考现场清掉。
+                        if ("reset".equals(kind)) post(panel::onRoundThinkingReset);
                     });
                     post(() -> {
                         if (a.error() != null) panel.showError(a.error());

@@ -8,6 +8,7 @@ import com.jev.probe.desktop.model.ChatSnapshot;
 import com.jev.probe.desktop.model.Choice;
 import com.jev.probe.desktop.model.Msg;
 import com.jev.probe.desktop.model.Score;
+import com.jev.probe.desktop.net.ApiException;
 import com.jev.probe.desktop.net.HttpJson;
 import com.jev.probe.desktop.net.Route;
 import com.jev.probe.desktop.prompt.JudgePrompts;
@@ -49,6 +50,15 @@ public class LlmJudgeClient {
     /** Used when the model omits `confidence` (it is not part of its task). */
     private static final double DEFAULT_CONFIDENCE = 0.5;
 
+    /**
+     * 「问 AI」开启思考所需的最小输出上限（tokens）。
+     *
+     * <p>思考过程与正文共用这个上限，实测一次真实的 30 条对话思考就要 3364
+     * tokens；上限低于 4096 时先开思考必然把正文挤空（`finish_reason=length`），
+     * 所以这种配置下直接不思考，先保证有答案。
+     */
+    private static final int THINKING_FLOOR = 4096;
+
     private final Config prefs;
 
     public LlmJudgeClient(Config prefs) {
@@ -80,17 +90,17 @@ public class LlmJudgeClient {
     ) {
         long start = System.currentTimeMillis();
         try {
-            HttpJson.ChatStream out = chat(
+            ChatOutcome out = chatAdaptive(
                 JudgePrompts.renderSystemPrompt(),
                 userMessage(snapshot, relationship, ctx),
                 0.0,
                 null,
+                true,
                 onDelta
             );
-            String content = out.content();
+            String content = out.stream().content();
             JSONObject o = extractJsonObject(content);
             if (o == null) throw new IllegalStateException("模型没有返回 JSON：" + take(content, 80));
-            String reasoning = out.reasoning() != null && !out.reasoning().isBlank() ? out.reasoning() : null;
             return new Analysis(
                 parseChoice(o.optJSONObject("true_intent")),
                 parseScore(o.optJSONObject("danger_level")),
@@ -102,7 +112,7 @@ public class LlmJudgeClient {
                 List.of(),
                 System.currentTimeMillis() - start,
                 null,
-                reasoning
+                reasoningOf(out)
             );
         } catch (Exception e) {
             LOGGER.warning("judge failed: " + e.getMessage());
@@ -149,6 +159,22 @@ public class LlmJudgeClient {
      * Unlike [judge] this is generative, so it is capped by the user's output
      * limit and is allowed to be as long as they asked for.
      *
+     * <p>Why the thinking pass is optional here, and why there is a retry. On a
+     * reasoning model the output cap counts the thinking tokens too. Measured
+     * 2026-09-29 against Bailian `deepseek-v4.1-flash`, a 30-message conversation
+     * and a ordinary question: 3364 reasoning tokens, `finish_reason=length`, and
+     * an EMPTY answer under the default 2048 cap — the reported 「问 AI 返回内容
+     * 为空」. Two defences, in order:
+     *
+     * <ol>
+     *   <li>a cap below [THINKING_FLOOR] means the budget cannot hold a thinking
+     *       pass plus an answer, so thinking is switched off for this call
+     *       (the judge route keeps thinking — it has no cap at all);</li>
+     *   <li>if the response still carries no content, ask again with thinking off,
+     *       which is what makes the answer arrive even on a host whose thinking
+     *       pass is longer than expected.</li>
+     * </ol>
+     *
      * @return the answer plus the thinking pass; the answer starts with
      *         "问 AI 失败" on error — the panel shows whatever comes back, so a
      *         failure has to be text.
@@ -160,21 +186,78 @@ public class LlmJudgeClient {
         ChatContext ctx,
         BiConsumer<String, String> onDelta
     ) {
+        String user = userMessage(snapshot, relationship, ctx) + "\n\n# 我的问题\n" + question.trim();
+        int cap = prefs.maxOutputTokens();
+        boolean thinking = cap >= THINKING_FLOOR;
         try {
-            HttpJson.ChatStream out = chat(
-                ASK_SYSTEM,
-                userMessage(snapshot, relationship, ctx) + "\n\n# 我的问题\n" + question.trim(),
-                0.3,
-                prefs.maxOutputTokens(),
-                onDelta
-            );
-            String reasoning = out.reasoning() != null && !out.reasoning().isBlank() ? out.reasoning() : null;
-            return new ChatAiClient.AskResult(out.content().trim(), reasoning);
+            ChatOutcome out = chatAdaptive(ASK_SYSTEM, user, 0.3, cap, thinking, onDelta);
+            return new ChatAiClient.AskResult(out.stream().content().trim(), reasoningOf(out));
         } catch (Exception e) {
             LOGGER.warning("ask failed: " + e.getMessage());
-            return new ChatAiClient.AskResult(
-                "问 AI 失败：" + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()), null);
+            return failed(e);
         }
+    }
+
+    /** 一次调用的结果：流 + 降级重试前已经流给用户看过的思考过程。 */
+    private record ChatOutcome(HttpJson.ChatStream stream, String reasoningBefore) {
+    }
+
+    /**
+     * 带「思考降级重试」的一次 chat 调用，判断与问 AI 共用。
+     *
+     * <p>为什么两条路由都要它：2026-09-29 实测到提供方 **HTTP 200 + 空响应**
+     * （既没有正文也没有思考），应用当时报的就是用户看到的
+     * 「判断接口 HTTP 200：响应里没有消息内容」；另一种是思考把输出额度吃光
+     * （实测 30 条对话思考 3364 tokens > 2048 上限）。这两种都属于“内容不可用”，
+     * 重发一次并顺手**关掉思考**即可拿到答案，代价比让用户看到报错小得多。
+     *
+     * <p>只对“内容不可用”（[ApiException#retryable] 为 false）降级重试；传输类失败
+     * 交给 HTTP 层自己的重试，不在这里再等一遍。
+     */
+    private ChatOutcome chatAdaptive(
+        String system,
+        String user,
+        double temperature,
+        Integer maxTokens,
+        boolean thinking,
+        BiConsumer<String, String> onDelta
+    ) {
+        StringBuilder seen = new StringBuilder();
+        BiConsumer<String, String> tap = (kind, chunk) -> {
+            if ("reasoning".equals(kind)) seen.append(chunk);
+            if (onDelta != null) onDelta.accept(kind, chunk);
+        };
+        try {
+            return new ChatOutcome(chat(system, user, temperature, maxTokens, tap, thinking), null);
+        } catch (RuntimeException first) {
+            if (!thinking || !contentFailure(first)) throw first;
+            LOGGER.warning("内容不可用，关闭思考重试一次：" + first.getMessage());
+            // 面板上正在显示第一轮的思考过程，重试前先清掉，免得两次思考叠在一起。
+            if (onDelta != null) onDelta.accept("reset", "");
+            String before = seen.toString();
+            return new ChatOutcome(chat(system, user, temperature, maxTokens, tap, false), before);
+        }
+    }
+
+    /** 内容类失败（空正文 / 只有思考 / 被上限截断），与传输类失败相对。 */
+    private static boolean contentFailure(Exception e) {
+        return e instanceof ApiException ae && !ae.retryable();
+    }
+
+    /**
+     * 思考过程：优先本轮流出来的，其次降级重试之前那一轮已经给用户看过的
+     * （重试不能让它凭空消失），最后才用响应体自带的字段。
+     */
+    private static String reasoningOf(ChatOutcome out) {
+        String streamed = out.stream().reasoning();
+        if (streamed != null && !streamed.isBlank()) return streamed.trim();
+        String before = out.reasoningBefore();
+        return before != null && !before.isBlank() ? before.trim() : null;
+    }
+
+    private static ChatAiClient.AskResult failed(Exception e) {
+        return new ChatAiClient.AskResult(
+            "问 AI 失败：" + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()), null);
     }
 
     /** One chat-completions round trip; returns the full streamed message. */
@@ -183,7 +266,8 @@ public class LlmJudgeClient {
         String user,
         double temperature,
         Integer maxTokens,
-        BiConsumer<String, String> onDelta
+        BiConsumer<String, String> onDelta,
+        boolean thinking
     ) {
         String url = prefs.judgeEndpoint();
         JSONArray messages = new JSONArray()
@@ -196,7 +280,7 @@ public class LlmJudgeClient {
         if (maxTokens != null) body.put("max_tokens", maxTokens);
         // Explicitly request the thinking pass on hosts that default it off
         // (Bailian; DeepSeek official selects it via the model name instead).
-        HttpJson.applyJudgeRouteOptions(body, url);
+        HttpJson.applyJudgeRouteOptions(body, url, thinking);
         // Streamed: with thinking on, the silent wait can exceed any sane read
         // timeout; streaming turns it into continuous chunk traffic.
         return HttpJson.postChatFull(url, prefs.judgeKey(), body, Route.JUDGE, prefs.proxy(), onDelta);

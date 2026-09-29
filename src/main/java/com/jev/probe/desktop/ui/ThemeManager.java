@@ -3,6 +3,7 @@ package com.jev.probe.desktop.ui;
 import com.sun.jna.platform.win32.Advapi32Util;
 import com.sun.jna.platform.win32.WinReg;
 
+import javax.swing.JComponent;
 import javax.swing.SwingUtilities;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -108,6 +109,32 @@ public final class ThemeManager {
 
     public static void removeListener(Runnable listener) {
         LISTENERS.remove(listener);
+    }
+
+    /**
+     * Ties a repaint callback to a component's own lifetime: registered while the
+     * component is in a window, withdrawn the moment it is not.
+     *
+     * <p>Dialogs are opened and closed many times per session and every control in
+     * them re-reads the palette on a theme change, so registering with
+     * {@link #addListener} from a constructor leaks one dead callback per control
+     * per open — the listener list grows without bound and every later theme
+     * change walks it. The lifecycle used here is the one `MdText.Area` already
+     * applies by hand: while the component is on screen the callback is live, and
+     * it goes away with the component.
+     *
+     * <p>[action] must be the SAME Runnable instance on every call for the same
+     * binding, which is why the overloads above take the reference rather than a
+     * lambda expression at the call site.
+     */
+    public static void bind(JComponent component, Runnable action) {
+        if (component == null || action == null) return;
+        component.addPropertyChangeListener("ancestor", e -> {
+            if (e.getNewValue() != null) addListener(action);
+            else removeListener(action);
+        });
+        // 已经挂在界面上时不会有 ancestor 事件，直接登记。
+        if (component.isShowing()) addListener(action);
     }
 
     private static void notifyListeners() {

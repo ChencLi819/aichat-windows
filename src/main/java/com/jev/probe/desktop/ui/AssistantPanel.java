@@ -45,9 +45,12 @@ import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
+import java.awt.GraphicsConfiguration;
+import java.awt.GraphicsEnvironment;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.Rectangle;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionEvent;
@@ -409,8 +412,27 @@ public final class AssistantPanel {
     }
 
     private void placeTopRight() {
-        Dimension screen = Toolkit.getDefaultToolkit().getScreenSize();
-        frame.setLocation(Math.max(0, screen.width - frame.getWidth() - 48), 64);
+        // 只用 AWT 的信息（默认屏 bounds + 屏幕 insets），不碰 Win32：面板的初始
+        // 摆放发生在窗口显示的关键路径上，而 JNA/Win32 的首次初始化要几百毫秒
+        // （见 Screens 的说明）。跨屏拖拽时才需要物理像素，那份拓扑由 Main 在
+        // 启动后后台预热。
+        GraphicsConfiguration gc = GraphicsEnvironment.getLocalGraphicsEnvironment()
+            .getDefaultScreenDevice().getDefaultConfiguration();
+        Rectangle screen = gc.getBounds();
+        Insets insets = Toolkit.getDefaultToolkit().getScreenInsets(gc);
+        Rectangle work = new Rectangle(
+            screen.x + insets.left, screen.y + insets.top,
+            screen.width - insets.left - insets.right,
+            screen.height - insets.top - insets.bottom);
+        // 屏幕装不下默认尺寸时先钳进工作区（与拖拽后的适配同一条规则）。
+        Dimension size = Screens.fitSize(
+            frame.getWidth(), frame.getHeight(), work, MIN_WIDTH, MIN_HEIGHT);
+        if (size.width != frame.getWidth() || size.height != frame.getHeight()) {
+            frame.setSize(size.width, size.height);
+        }
+        int x = Math.max(work.x, work.x + work.width - frame.getWidth() - 48);
+        int y = Math.max(work.y, work.y + 64);
+        frame.setLocation(x, y);
     }
 
     // ----------------------------------------------------------------- layout
@@ -1096,8 +1118,14 @@ public final class AssistantPanel {
             last = new Ask(question == null ? "" : question);
             asks.add(last);
         }
-        last.answer = answer;
-        last.reasoning = reasoning;
+        if (answer == null || answer.isBlank()) {
+            // 兜底：上游（LlmJudgeClient.ask）已经保证了“失败也会带回一句人话”，
+            // 但万一还是空的，也绝不能让用户对着一个空气泡猜发生了什么。
+            last.error = "模型没有返回内容，请再问一次。";
+        } else {
+            last.answer = answer;
+            last.reasoning = reasoning;
+        }
         askBusy = false;
         liveThink = null;
         liveChip = null;
@@ -1105,6 +1133,24 @@ public final class AssistantPanel {
         showTab(1);
         renderAsk();
         scrollAskBottom();
+    }
+
+    /** 清空流式思考的现场：重试时把上一次（被截断的）思考过程丢掉。 */
+    public void onThinkingReset() {
+        askThink.setLength(0);
+        thinkSince = System.currentTimeMillis();
+        liveThink = null;
+        liveChip = null;
+        renderAsk();
+    }
+
+    /** 「AI 分析」那一侧同上：判断路由重试前清掉上一轮思考的流式现场。 */
+    public void onRoundThinkingReset() {
+        think.setLength(0);
+        thinkSince = System.currentTimeMillis();
+        liveThink = null;
+        liveChip = null;
+        render();
     }
 
     public void showAskError(String msg) {

@@ -28,9 +28,28 @@ import java.awt.event.MouseEvent;
  * and filtering by window sidesteps both — it stays correct no matter what the
  * content does.
  *
- * <p>Geometry is taken in screen coordinates, not component coordinates: during
- * a drag the window itself moves, so a component-relative delta would feed back
- * into its own result and the window would run away from the cursor.
+ * <p>Geometry is taken in PHYSICAL pixels (Win32) and only converted to AWT's
+ * logical coordinates at the last moment, through {@link Screens}. Two measured
+ * facts force that shape:
+ *
+ * <ul>
+ *   <li>AWT cannot be asked directly on a mixed-DPI desktop. On this machine the
+ *       primary monitor is reported as 0…1536 (scale 1.25) while the secondary
+ *       one is reported at x = -2560 with a 1707 logical width (scale 1.5), so
+ *       the two logical ranges do not meet — the seam is a hole. A drag that
+ *       used logical screen coordinates therefore jumped by hundreds of units
+ *       when the pointer crossed that seam, and a drag that started on an edge
+ *       (a resize) blew the window up to several times its size.</li>
+ *   <li>The physical cursor position has no seam, so the drag is computed there
+ *       and the resulting physical rectangle is mapped onto the target monitor's
+ *       own mapping ({@link Screens.Monitor#toLogical}).</li>
+ * </ul>
+ *
+ * <p>Events are filtered by the WINDOW THAT OWNS THEM, not by the owner chain:
+ * {@code SwingUtilities.getWindowAncestor(dialog)} answers the dialog's owner
+ * frame (a JDialog's parent is its owner), which used to make the panel treat
+ * the settings dialog's drags as its own — dragging the dialog resized the panel
+ * at the same time.
  *
  * <p>It works on any {@link Window}, not just the panel: the settings and
  * knowledge dialogs are undecorated too and need the same edges, and a
@@ -66,7 +85,12 @@ public final class WindowResizer implements AWTEventListener {
     private Point pressOnScreen;
     /** The press position in physical pixels — see [delta]. */
     private Point pressPhysical;
+    /** The window's physical rectangle when the drag started (Win32). */
+    private Rectangle startPhysical;
+    /** The window's logical size when the drag started — kept constant while moving. */
     private Rectangle startBounds;
+    /** DPI scale captured at press, used only on the AWT fallback path. */
+    private double startScale = 1.0;
 
     /** The component whose cursor we borrowed, what it was, and the zone. */
     private Component hot;
@@ -150,11 +174,21 @@ public final class WindowResizer implements AWTEventListener {
      * edge is sourced from the window, not from a child, and
      * {@code getWindowAncestor} of a window is null — so a plain ancestor check
      * silently drops every event in exactly the region this class cares about.
+     *
+     * <p>An event whose source IS another window is never ours — and it must be
+     * tested that way round. {@code SwingUtilities.getWindowAncestor(c)} on a
+     * child of our dialog answers the dialog, but on the DIALOG ITSELF it walks
+     * up the owner chain and answers our frame (a JDialog's parent is its
+     * owner). Accepting that made the panel resize itself while the settings
+     * dialog was being dragged. An undecorated window delivers its edge and
+     * header events with the window as the source, so this is not a corner
+     * case: it is every drag of every dialog this app opens.
      */
     private boolean isOurs(MouseEvent me) {
         Component c = me.getComponent();
         if (c == null) return false;
-        return c == window || SwingUtilities.getWindowAncestor(c) == window;
+        Window source = c instanceof Window w ? w : SwingUtilities.getWindowAncestor(c);
+        return source == window;
     }
 
     // --------------------------------------------------------------- cursor
@@ -212,6 +246,11 @@ public final class WindowResizer implements AWTEventListener {
     private int edgesAt(Point p) {
         int w = window.getWidth();
         int h = window.getHeight();
+        // A point outside the window is not a grab zone. Without this, a press
+        // from another window whose coordinates happened to convert to
+        // (-20, -65) satisfied both "< GRAB" tests and read as a north-west
+        // corner grab on a window the pointer was nowhere near.
+        if (p.x < 0 || p.y < 0 || p.x >= w || p.y >= h) return 0;
         int e = 0;
         if (p.x < GRAB) e |= W;
         if (p.x >= w - GRAB) e |= E;
@@ -240,14 +279,11 @@ public final class WindowResizer implements AWTEventListener {
     /**
      * How far the pointer has moved since the press, in the window's own units.
      *
-     * Taken from the cursor's PHYSICAL position whenever Windows can supply it,
-     * and divided by the window's monitor scale to get back into AWT's units. AWT
-     * cannot be asked directly on a mixed-DPI desktop: measured on this machine,
-     * the primary monitor is reported as 0…1536 while the secondary one is
-     * reported at x = -2560, so the two do not meet — a drag across that seam
-     * produces a delta of several hundred units for a few pixels of hand movement,
-     * and the window is hurled open to many times its size. A physical cursor
-     * position has no seam, so the window keeps tracking the hand on both screens.
+     * Taken from the cursor's PHYSICAL position and divided by the window's
+     * monitor scale to get back into AWT's units. Only used on the fallback path
+     * ([{@link #drag}]) — the normal path works in physical pixels throughout,
+     * because dividing by the scale of the monitor the window happens to be on is
+     * itself a source of jumps: the scale changes under the window mid-drag.
      */
     private Point delta(MouseEvent me) {
         Point now = Win32Windows.supported() ? Win32Windows.cursorPoint() : null;
@@ -256,12 +292,9 @@ public final class WindowResizer implements AWTEventListener {
             return new Point(awt.x - pressOnScreen.x, awt.y - pressOnScreen.y);
         }
         if (pressPhysical == null) pressPhysical = now;
-        double scale = window.getGraphicsConfiguration() == null ? 1.0
-            : window.getGraphicsConfiguration().getDefaultTransform().getScaleX();
-        if (scale <= 0) scale = 1.0;
         return new Point(
-            (int) Math.round((now.x - pressPhysical.x) / scale),
-            (int) Math.round((now.y - pressPhysical.y) / scale));
+            (int) Math.round((now.x - pressPhysical.x) / startScale),
+            (int) Math.round((now.y - pressPhysical.y) / startScale));
     }
 
     private void begin(MouseEvent me) {
@@ -277,6 +310,10 @@ public final class WindowResizer implements AWTEventListener {
         pressOnScreen = me.getLocationOnScreen();
         pressPhysical = Win32Windows.supported() ? Win32Windows.cursorPoint() : null;
         startBounds = window.getBounds();
+        startPhysical = Screens.physicalOf(window);
+        startScale = startPhysical == null
+            ? Screens.of(window).scale()
+            : Screens.atRect(startPhysical).scale();
         // The arrows must survive the drag: the pointer stays on the edge while
         // the edge moves under it, so the component beneath it keeps changing.
         if (!moving) apply(c, zone);
@@ -306,51 +343,154 @@ public final class WindowResizer implements AWTEventListener {
 
     private void drag(MouseEvent me) {
         if (edges == 0 && !moving) return;
+        apply(me.getComponent(), edges);
+
+        Point cursor = Win32Windows.supported() ? Win32Windows.cursorPoint() : null;
+        if (startPhysical != null && pressPhysical != null && cursor != null) {
+            int dx = cursor.x - pressPhysical.x;
+            int dy = cursor.y - pressPhysical.y;
+            Rectangle want = moving
+                ? moved(startPhysical, dx, dy)
+                : resized(startPhysical, dx, dy);
+            // 跨屏时的目标屏：按窗口中心所在的那台，把物理矩形折算成该屏的逻辑坐标。
+            Screens.Monitor target = Screens.atRect(want);
+            window.setBounds(target.toLogical(want));
+            return;
+        }
+
+        // 没有 Win32（非 Windows / JNA 不可用）：退回纯 AWT 逻辑坐标，
+        // 但比例因子沿用按下时的值，避免拖到另一块屏时中途换尺度。
         Point delta = delta(me);
         int dx = delta.x;
         int dy = delta.y;
-
         if (moving) {
             window.setLocation(startBounds.x + dx, startBounds.y + dy);
             return;
         }
+        window.setBounds(edgeBounds(startBounds, edges, dx, dy, 1.0, minWidth, minHeight));
+    }
 
-        apply(me.getComponent(), edges);
+    /**
+     * The window's physical rectangle after moving by [dx],[dy] physical pixels.
+     *
+     * <p>The SIZE is taken from the logical size captured at press, converted with
+     * the target monitor's scale. That is what keeps the window's apparent size
+     * constant while it crosses a DPI seam: AWT renders a logical size at
+     * {@code logical × scale} physical pixels, so holding the logical size holds
+     * what the user sees, and the physical footprint only changes by the DPI
+     * ratio — the platform-standard behaviour for a DPI-aware application.
+     *
+     * <p>The result is then nudged back so the window's centre stays inside the
+     * target monitor's work area: a drag can never park the window somewhere the
+     * user cannot reach its title bar again.
+     */
+    private Rectangle moved(Rectangle start, int dx, int dy) {
+        Rectangle want = new Rectangle(start.x + dx, start.y + dy,
+            (int) Math.round(startBounds.width * scaleOf(start, dx, dy)),
+            (int) Math.round(startBounds.height * scaleOf(start, dx, dy)));
+        Screens.Monitor target = Screens.atRect(want);
+        Rectangle work = target.workPhysical();
+        int cx = want.x + want.width / 2;
+        int cy = want.y + want.height / 2;
+        int ncx = Math.max(work.x, Math.min(work.x + work.width, cx));
+        int ncy = Math.max(work.y, Math.min(work.y + work.height, cy));
+        want.translate(ncx - cx, ncy - cy);
+        return want;
+    }
 
-        int x = startBounds.x;
-        int y = startBounds.y;
-        int w = startBounds.width;
-        int h = startBounds.height;
+    /** 移动目标点的 DPI 比例：窗口中心大致落在哪台屏上，就用哪台屏的比例。 */
+    private double scaleOf(Rectangle start, int dx, int dy) {
+        Point centre = new Point(start.x + start.width / 2 + dx, start.y + start.height / 2 + dy);
+        return Screens.atPoint(centre).scale();
+    }
+
+    /**
+     * The physical rectangle after dragging the held edges by [dx],[dy].
+     *
+     * Physical pixels throughout, so the edge follows the hand on both monitors;
+     * the minimum size is the logical minimum expressed in the target monitor's
+     * pixels, which keeps "cannot be dragged smaller than MIN_WIDTH×MIN_HEIGHT"
+     * true in the units the design is written in.
+     */
+    private Rectangle resized(Rectangle start, int dx, int dy) {
+        double scale = scaleOf(start, dx, dy);
+        Rectangle phys = edgeBounds(start, edges, dx, dy, scale, minWidth, minHeight);
+        Screens.Monitor target = Screens.atRect(phys);
+        return edgeBounds(start, edges, dx, dy, target.scale(), minWidth, minHeight);
+    }
+
+    /**
+     * The pure edge arithmetic, shared by both paths: which edges move, and the
+     * clamping that keeps the edge the user is NOT holding still.
+     *
+     * Package-private and static so the geometry can be unit-tested without a
+     * window: pulling the west edge past the minimum width must stop the window
+     * rather than slide it, and a north-west corner grab must move the origin.
+     *
+     * @param scale the target monitor's DPI scale, so the logical minimum is
+     *        enforced in the units the design is written in
+     */
+    static Rectangle edgeBounds(
+        Rectangle start, int edges, int dx, int dy, double scale, int minWidth, int minHeight
+    ) {
+        int x = start.x;
+        int y = start.y;
+        int w = start.width;
+        int h = start.height;
         if ((edges & W) != 0) {
-            x = startBounds.x + dx;
-            w = startBounds.width - dx;
+            x = start.x + dx;
+            w = start.width - dx;
         }
-        if ((edges & E) != 0) w = startBounds.width + dx;
+        if ((edges & E) != 0) w = start.width + dx;
         if ((edges & N) != 0) {
-            y = startBounds.y + dy;
-            h = startBounds.height - dy;
+            y = start.y + dy;
+            h = start.height - dy;
         }
-        if ((edges & S) != 0) h = startBounds.height + dy;
+        if ((edges & S) != 0) h = start.height + dy;
 
-        // Clamping keeps the edge the user is NOT holding still: pulling the
-        // west edge past the minimum width would otherwise slide the whole
-        // window right instead of stopping.
-        if (w < minWidth) {
-            if ((edges & W) != 0) x -= minWidth - w;
-            w = minWidth;
+        int minW = Math.max(1, (int) Math.round(minWidth * scale));
+        int minH = Math.max(1, (int) Math.round(minHeight * scale));
+        if (w < minW) {
+            if ((edges & W) != 0) x -= minW - w;
+            w = minW;
         }
-        if (h < minHeight) {
-            if ((edges & N) != 0) y -= minHeight - h;
-            h = minHeight;
+        if (h < minH) {
+            if ((edges & N) != 0) y -= minH - h;
+            h = minH;
         }
-        window.setBounds(x, y, w, h);
+        return new Rectangle(x, y, w, h);
     }
 
     private void end() {
+        boolean dragged = edges != 0 || moving;
         edges = 0;
         moving = false;
         pressOnScreen = null;
         pressPhysical = null;
+        startPhysical = null;
         startBounds = null;
+        if (dragged) adaptToScreen();
+    }
+
+    /**
+     * 拖拽/缩放结束后把窗口收进目标屏：装不下就等比缩小，窗口中心已经跑到
+     * 屏幕外才把它拉回来。
+     *
+     * <p>刻意不做“一律贴回屏内”：Windows 上把窗口拖到屏边、留一部分在屏幕外是
+     * 正常的用法，松手时强行推回去会像窗口自己在跳。拖拽本身（{@link #moved}）
+     * 已经保证中心留在工作区内，所以窗口永远抓得回来；这里只处理两种真正的坏
+     * 状态：比屏幕还大、以及中心不在任何屏幕上（例如中途拔掉了显示器）。
+     */
+    public void adaptToScreen() {
+        if (!window.isDisplayable()) return;
+        Rectangle now = window.getBounds();
+        Screens.Monitor target = Screens.of(window);
+        Rectangle fitted = Screens.fitInto(now, target, minWidth, minHeight);
+        Rectangle centre = target.toPhysical(new Rectangle(
+            fitted.x + Math.max(1, fitted.width / 2), fitted.y + Math.max(1, fitted.height / 2), 1, 1));
+        if (!target.workPhysical().contains(centre)) {
+            fitted = Screens.keepInside(fitted, target);
+        }
+        if (!fitted.equals(now)) window.setBounds(fitted);
     }
 }

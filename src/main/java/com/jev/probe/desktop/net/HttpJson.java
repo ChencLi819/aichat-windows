@@ -150,12 +150,22 @@ public final class HttpJson {
      * The judge route THINKS (accuracy of the 7 answers is the product); the
      * reply route does NOT (three ≤40-char lines — measured ~15s → ~1-2s).
      * Params are only ever sent to the platform that defines them.
+     *
+     * <p>The ask route is the third case: it thinks only while the caller's
+     * output budget can hold a thinking pass plus an answer, because on a
+     * reasoning model the cap counts BOTH — measured 2026-09-29 on a 30-message
+     * conversation: 3364 reasoning tokens and an EMPTY answer under the default
+     * 2048 cap (`finish_reason=length`). See [LlmJudgeClient.ask].
      */
     public static void applyJudgeRouteOptions(JSONObject body, String url) {
+        applyJudgeRouteOptions(body, url, true);
+    }
+
+    public static void applyJudgeRouteOptions(JSONObject body, String url, boolean thinking) {
         if (isBailian(url)) {
-            body.put("enable_thinking", true);
+            body.put("enable_thinking", thinking);
         } else if (isDeepSeek(url)) {
-            body.put("thinking", new JSONObject().put("type", "enabled"));
+            body.put("thinking", new JSONObject().put("type", thinking ? "enabled" : "disabled"));
         }
     }
 
@@ -195,8 +205,18 @@ public final class HttpJson {
         return postChatFull(url, key, body, route, proxy, null).content();
     }
 
-    /** The assistant message plus its thinking pass, when the model emitted one. */
-    public record ChatStream(String content, String reasoning) {
+    /** The assistant message plus its thinking pass, when the model emitted one.
+     *
+     * @param finishReason the provider's stop reason (`stop` / `length` / …), or
+     *        null when the transport never reported one. `length` together with an
+     *        empty content is the "thinking ate the whole budget" signature — see
+     *        [LlmJudgeClient.ask].
+     */
+    public record ChatStream(String content, String reasoning, String finishReason) {
+
+        public ChatStream(String content, String reasoning) {
+            this(content, reasoning, null);
+        }
     }
 
     /**
@@ -227,6 +247,7 @@ public final class HttpJson {
         while (attempt < 2) {
             StringBuilder reasoning = new StringBuilder();
             StringBuilder content = new StringBuilder();
+            String[] finish = new String[1];
             try {
                 URL u = new URL(url);
                 conn = (HttpURLConnection) (proxy != null ? u.openConnection(proxy) : u.openConnection());
@@ -248,11 +269,18 @@ public final class HttpJson {
                     String err = readBody(conn.getErrorStream());
                     throw new ApiException(route, code, err.isBlank() ? "（响应体为空）" : err);
                 }
-                boolean sse = readStream(conn.getInputStream(), reasoning, content, onDelta);
-                ChatStream out = sse ? splitInlineThink(content) : parsePlainChatResponse(content.toString());
-                if (out.content().isBlank()) throw new ApiException(route, code, "响应里没有消息内容");
+                boolean sse = readStream(conn.getInputStream(), reasoning, content, finish, onDelta);
+                ChatStream out = sse ? splitInlineThink(content, finish[0])
+                    : parsePlainChatResponse(content.toString());
+                if (out.content().isBlank()) {
+                    // 内容为空是“答案本身的问题”，不是传输抖动：重发一次只会再花一遍
+                    // 思考时间（实测每次思考几十秒），所以标为不可重试，交给调用方决定
+                    // 换一种问法（见 LlmJudgeClient.ask 的降级重试）。
+                    throw new ApiException(route, code, emptyContentReason(out), false);
+                }
                 return out;
             } catch (ApiException e) {
+                if (!e.retryable()) throw e;
                 if (e.status() != null && e.status() >= 400 && e.status() <= 499) throw e;
                 last = e;
                 attempt++;
@@ -261,7 +289,7 @@ public final class HttpJson {
                 // Restarting would re-pay the entire thinking pass.
                 if (!content.toString().isBlank()) {
                     LOGGER.warning("stream interrupted after " + content.length() + " chars; returning partial");
-                    return splitInlineThink(content);
+                    return splitInlineThink(content, finish[0]);
                 }
                 last = new ApiException(route, null, describe(e));
                 attempt++;
@@ -275,6 +303,17 @@ public final class HttpJson {
         throw last != null ? last : new ApiException(route, null, "请求失败");
     }
 
+    /** 空正文的人话解释：能区分“答案被输出上限截断”与“模型什么也没说”。 */
+    private static String emptyContentReason(ChatStream out) {
+        if ("length".equalsIgnoreCase(out.finishReason())) {
+            return "模型只输出了思考过程就用满了输出上限（正文为空）";
+        }
+        if (out.reasoning() != null && !out.reasoning().isBlank()) {
+            return "模型只返回了思考过程，没有给出正文";
+        }
+        return "响应里没有消息内容";
+    }
+
     /**
      * Read the response incrementally, line by line, feeding builders and
      * [onDelta] as chunks land. Returns true when the body was SSE
@@ -284,6 +323,7 @@ public final class HttpJson {
         InputStream stream,
         StringBuilder reasoning,
         StringBuilder content,
+        String[] finish,
         BiConsumer<String, String> onDelta
     ) throws IOException {
         boolean sse = false;
@@ -297,8 +337,14 @@ public final class HttpJson {
                     if (!payload.isEmpty() && !payload.equals("[DONE]")) {
                         try {
                             JSONArray choices = new JSONObject(payload).optJSONArray("choices");
-                            JSONObject delta = choices == null ? null : choices.optJSONObject(0);
-                            delta = delta == null ? null : delta.optJSONObject("delta");
+                            JSONObject choice = choices == null ? null : choices.optJSONObject(0);
+                            // finish_reason 只在最后一个 chunk 出现，但要区分
+                            // “正常结束”与“被输出上限截断”，见 emptyContentReason。
+                            if (choice != null) {
+                                String fr = choice.optString("finish_reason");
+                                if (!fr.isEmpty()) finish[0] = fr;
+                            }
+                            JSONObject delta = choice == null ? null : choice.optJSONObject("delta");
                             if (delta != null) {
                                 String think = delta.optString("reasoning_content");
                                 if (think.isEmpty()) think = delta.optString("reasoning");
@@ -328,16 +374,16 @@ public final class HttpJson {
 
     /** Some models inline their thinking as `<think>…</think>` inside content
      *  instead of a separate field — lift it out at completion time. */
-    private static ChatStream splitInlineThink(StringBuilder content) {
+    private static ChatStream splitInlineThink(StringBuilder content, String finishReason) {
         String s = content.toString().trim();
         if (s.startsWith("<think>")) {
             int end = s.indexOf("</think>");
             if (end > 0) {
                 String think = s.substring("<think>".length(), end).trim();
-                return new ChatStream(s.substring(end + "</think>".length()).trim(), think.isBlank() ? null : think);
+                return new ChatStream(s.substring(end + "</think>".length()).trim(), think.isBlank() ? null : think, finishReason);
             }
         }
-        return new ChatStream(s, null);
+        return new ChatStream(s, null, finishReason);
     }
 
     /** Plain (provider ignored `stream`) completion object → content + reasoning. */
@@ -347,16 +393,19 @@ public final class HttpJson {
             o = new JSONObject(contentRaw);
         } catch (Exception ignored) {
         }
+        JSONObject choice = null;
         JSONObject msg = null;
         if (o != null) {
             JSONArray choices = o.optJSONArray("choices");
-            msg = choices == null ? null : choices.optJSONObject(0);
-            msg = msg == null ? null : msg.optJSONObject("message");
+            choice = choices == null ? null : choices.optJSONObject(0);
+            msg = choice == null ? null : choice.optJSONObject("message");
         }
         String think = msg == null ? null : msg.optString("reasoning_content");
         if (think != null && think.isEmpty()) think = msg.optString("reasoning");
         String content = msg == null ? "" : msg.optString("content");
-        return new ChatStream(content, (think == null || think.isBlank()) ? null : think);
+        String finish = choice == null ? null : choice.optString("finish_reason");
+        if (finish != null && finish.isEmpty()) finish = null;
+        return new ChatStream(content, (think == null || think.isBlank()) ? null : think, finish);
     }
 
     /** Human-readable transport failures (no key material ever appears here). */

@@ -169,11 +169,14 @@ public class DialogShell {
         dialog.getRootPane().registerKeyboardAction(e -> close(),
             KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0),
             JComponent.WHEN_IN_FOCUSED_WINDOW);
-        ThemeManager.addListener(() -> {
+        Runnable restyle = () -> {
             titleLabel.setFont(Theme.font(Font.BOLD, Tokens.FS_TITLE));
             titleLabel.setForeground(Theme.tokens().text1());
             root.repaint();
-        });
+        };
+        // 按组件生命周期登记：对话框每次打开都会新建一套，用全局 addListener
+        // 会让每次关闭都留下永不释放的回调（见 ThemeManager.bind）。
+        ThemeManager.bind(titleLabel, restyle);
     }
 
     /**
@@ -245,10 +248,11 @@ public class DialogShell {
         note.setForeground(Theme.tokens().text3());
         footWest.removeAll();
         footWest.add(note);
-        ThemeManager.addListener(() -> {
+        Runnable restyle = () -> {
             note.setFont(Theme.font(Font.PLAIN, Tokens.FS_NOTE));
             note.setForeground(Theme.tokens().text3());
-        });
+        };
+        ThemeManager.bind(note, restyle);
         return this;
     }
 
@@ -313,12 +317,13 @@ public class DialogShell {
         p.add(t);
         p.add(Box.createVerticalStrut(Tokens.SP1));
         p.add(d);
-        ThemeManager.addListener(() -> {
+        Runnable restyle = () -> {
             t.setFont(Theme.font(Font.BOLD, Tokens.FS_TITLE));
             d.setFont(Theme.font(Font.PLAIN, Tokens.FS_NOTE));
             t.setForeground(Theme.tokens().text1());
             d.setForeground(Theme.tokens().text2());
-        });
+        };
+        ThemeManager.bind(t, restyle);
         return p;
     }
 
@@ -328,10 +333,11 @@ public class DialogShell {
         l.setFont(Theme.font(Font.BOLD, Tokens.FS_NOTE));
         l.setForeground(Theme.tokens().text2());
         l.setAlignmentX(JComponent.LEFT_ALIGNMENT);
-        ThemeManager.addListener(() -> {
+        Runnable restyle = () -> {
             l.setFont(Theme.font(Font.BOLD, Tokens.FS_NOTE));
             l.setForeground(Theme.tokens().text2());
-        });
+        };
+        ThemeManager.bind(l, restyle);
         return l;
     }
 
@@ -390,10 +396,11 @@ public class DialogShell {
             d.setAlignmentX(JComponent.LEFT_ALIGNMENT);
             p.add(d);
         }
-        ThemeManager.addListener(() -> {
+        Runnable restyle = () -> {
             t.setFont(Theme.font(Font.PLAIN, Tokens.FS_BODY));
             t.setForeground(Theme.tokens().text1());
-        });
+        };
+        ThemeManager.bind(t, restyle);
         return p;
     }
 }

@@ -46,14 +46,10 @@ import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
-import java.awt.GraphicsConfiguration;
-import java.awt.GraphicsDevice;
-import java.awt.GraphicsEnvironment;
 import java.awt.GridLayout;
 import java.awt.Insets;
 import java.awt.Point;
 import java.awt.Rectangle;
-import java.awt.Toolkit;
 import java.awt.Window;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
@@ -383,13 +379,11 @@ public final class SettingsDialog {
      */
     private void placeOnScreen() {
         JDialog dialog = shell.dialog();
-        GraphicsConfiguration gc = screenConfiguration(dialog);
-        Rectangle screen = gc.getBounds();
-        Insets insets = Toolkit.getDefaultToolkit().getScreenInsets(gc);
-        Rectangle usable = new Rectangle(
-            screen.x + insets.left, screen.y + insets.top,
-            screen.width - insets.left - insets.right,
-            screen.height - insets.top - insets.bottom);
+        // 用 Screens 取「宿主面板所在那块屏」的工作区：混合 DPI 下 AWT 的逻辑
+        // 坐标与物理像素不一致，只有它能同时给出正确的屏幕归属与可用区域。
+        Window owner = dialog.getOwner();
+        Screens.Monitor target = Screens.of(owner != null ? owner : dialog);
+        Rectangle usable = target.workLogical();
 
         Dimension size = dialog.getSize();
         if (size.width > usable.width || size.height > usable.height) {
@@ -402,27 +396,6 @@ public final class SettingsDialog {
         dialog.setLocation(
             clamp(dialog.getX(), usable.x, usable.x + usable.width - size.width),
             clamp(dialog.getY(), usable.y, usable.y + usable.height - size.height));
-    }
-
-    /**
-     * The screen the dialog should open on: the one holding the owner's centre,
-     * so a panel dragged to a second monitor brings settings with it.
-     */
-    private static GraphicsConfiguration screenConfiguration(JDialog dialog) {
-        GraphicsConfiguration own = dialog.getGraphicsConfiguration();
-        Window source = dialog.getOwner();
-        if (source == null) {
-            return own != null ? own : GraphicsEnvironment.getLocalGraphicsEnvironment()
-                .getDefaultScreenDevice().getDefaultConfiguration();
-        }
-        Point center = source.getLocation();
-        center.translate(source.getWidth() / 2, source.getHeight() / 2);
-        for (GraphicsDevice device
-            : GraphicsEnvironment.getLocalGraphicsEnvironment().getScreenDevices()) {
-            GraphicsConfiguration gc = device.getDefaultConfiguration();
-            if (gc.getBounds().contains(center)) return gc;
-        }
-        return own != null ? own : source.getGraphicsConfiguration();
     }
 
     /** `hi` below `lo` means the window is wider than the screen; keep `lo`. */
@@ -964,6 +937,9 @@ public final class SettingsDialog {
      * A label that re-reads the palette and the 标准/大 size on every theme
      * change. Any colour or font set once at construction would be frozen, which
      * is the whole reason the old screen could not switch theme in place.
+     *
+     * <p>回调按组件生命周期登记（{@link ThemeManager#bind}）：设置窗每开一次都会
+     * 重建整套控件，用全局 addListener 会在每次关闭后留下永远不释放的回调。
      */
     private static JLabel themedLabel(
         String text, int style, float size, Function<Tokens, Color> color
@@ -972,10 +948,11 @@ public final class SettingsDialog {
         label.setFont(Theme.font(style, size));
         label.setForeground(color.apply(Theme.tokens()));
         label.setAlignmentX(JComponent.LEFT_ALIGNMENT);
-        ThemeManager.addListener(() -> {
+        Runnable restyle = () -> {
             label.setFont(Theme.font(style, size));
             label.setForeground(color.apply(Theme.tokens()));
-        });
+        };
+        ThemeManager.bind(label, restyle);
         return label;
     }
 
@@ -1246,7 +1223,7 @@ public final class SettingsDialog {
                     showPage(index);
                 }
             });
-            ThemeManager.addListener(this::repaint);
+            ThemeManager.bind(this, this::repaint);
         }
 
         /**
@@ -1329,7 +1306,7 @@ public final class SettingsDialog {
                     if (action != null) action.run();
                 }
             });
-            ThemeManager.addListener(this::repaint);
+            ThemeManager.bind(this, this::repaint);
         }
 
         @Override
@@ -1387,7 +1364,7 @@ public final class SettingsDialog {
 
         RouteStatus() {
             setOpaque(false);
-            ThemeManager.addListener(this::repaint);
+            ThemeManager.bind(this, this::repaint);
         }
 
         void set(State next, String label) {
@@ -1469,7 +1446,7 @@ public final class SettingsDialog {
             super(2, 20);
             readOnly();
             setAlignmentX(JComponent.LEFT_ALIGNMENT);
-            ThemeManager.addListener(this::restyle);
+            ThemeManager.bind(this, this::restyle);
             restyle();
         }
 
