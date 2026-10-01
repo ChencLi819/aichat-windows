@@ -33,7 +33,10 @@
 
 ## 下载
 
-- [Releases](https://github.com/ChencLi819/aichat-windows/releases)：便携版 zip，解压后运行文件夹里的 `AIChatAssistant.exe`。自带 JRE，**无需安装 Java**，也不需要安装过程。
+- [Releases](https://github.com/ChencLi819/aichat-windows/releases)：
+  - [AIChatAssistant-0.2.1.msi](https://github.com/ChencLi819/aichat-windows/releases/download/v0.2.1/AIChatAssistant-0.2.1.msi) — 安装包，安装到本机并创建开始菜单快捷方式
+  - [AIChatAssistant-0.2.1-portable.zip](https://github.com/ChencLi819/aichat-windows/releases/download/v0.2.1/AIChatAssistant-0.2.1-portable.zip) — 便携版 zip，解压后运行文件夹里的 `AIChatAssistant.exe`
+- 两者都自带 JRE，**无需安装 Java**。
 - 需要 Windows 10 及以上，以及一把你自己申请的模型接口密钥（OpenAI 兼容，判断 / 生成 / 视觉三路可分别配置）。
 
 ## 它做什么
