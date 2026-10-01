@@ -4,6 +4,7 @@
 
 **挂在聊天窗口旁的「对话副驾」：看屏读取正在聊的对话，判断对方意图与风险，起草 3 条候选回复，一键填进输入框——发不发，永远由你。**
 
+[![CI](https://github.com/ChencLi819/aichat-windows/actions/workflows/ci.yml/badge.svg)](https://github.com/ChencLi819/aichat-windows/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/%E7%89%88%E6%9C%AC-v0.2.1-1f6feb?style=flat-square)](#下载)
 [![Windows](https://img.shields.io/badge/Windows-10%2B-0078D4?style=flat-square&logo=windows&logoColor=white)](#构建与运行)
 [![Java](https://img.shields.io/badge/Java-17-f89820?style=flat-square&logo=openjdk&logoColor=white)](#构建与运行)
