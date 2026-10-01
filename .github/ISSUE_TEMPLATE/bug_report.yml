@@ -1,0 +1,52 @@
+name: 问题反馈（Bug）
+description: 报告一个可以复现的问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先检索现有 Issue。**不要贴真实聊天内容、联系人信息或密钥**，测试数据请用虚构示例。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 现象与期望行为的对比。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 框选区域 …
+        2. 在 … 聊天窗口里 …
+        3. 看到 …
+    validations:
+      required: true
+  - type: dropdown
+    id: app-stage
+    attributes:
+      label: 出问题的环节
+      options:
+        - 采集（截屏 / 视觉读取，读错或读不到）
+        - 分析结果不对（判断 / 候选回复）
+        - 悬浮面板显示或交互
+        - 填入 / 复制
+        - 接口连通 / 密钥配置
+        - 安装、打包、启动
+        - 其他
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: 环境信息
+      description: Windows 版本 / 聊天软件版本 / 本应用版本（安装包或便携版）
+      placeholder: "例：Windows 11 24H2，微信 4.x，AIChat v0.2.1 安装版"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 截图或日志
+      description: 请确认截图里没有真实聊天内容。
